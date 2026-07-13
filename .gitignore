@@ -1,0 +1,45 @@
+# Build directories
+build/
+cmake-build-*/
+out/
+*.o
+*.obj
+*.exe
+*.dll
+*.a
+*.lib
+
+# Default capture output
+captured_page.html
+
+# Python caches / packaging
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+dist/
+dist_test/
+build_wheel/
+
+# Download-&-run release archives (built by scripts/package_release.py)
+release/
+
+# Benchmark run artifacts (reproducible; not source)
+benchmarks/results/
+
+# Vendored dependency tree (large; built/fetched locally)
+vcpkg/
+
+# Internal / working README (not published)
+README.internal.md
+
+# Editor / OS
+.idea/
+.vscode/
+.vs/
+.DS_Store
+
+# Scraped third-party site fixtures (local only, not published)
+captures/
+fanduel_body.html
+fanduel_report.json

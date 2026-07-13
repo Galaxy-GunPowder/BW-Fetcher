@@ -1,0 +1,11 @@
+# Root GitLab CI entry — includes the bw-fetcher-py release pipeline only.
+# GitHub uses .github/workflows/release.yml (separate names, same PyPI package).
+#
+# Trigger: push tag v1.2.3
+#   git tag v0.2.0 && git push origin v0.2.0
+#
+# Required CI/CD variable (Settings → CI/CD → Variables):
+#   PYPI_API_TOKEN  — masked, protected
+
+include:
+  - local: .gitlab/ci/bw-fetcher-py-release.yml

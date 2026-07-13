@@ -1,0 +1,5 @@
+# Optional clients for the benchmark suite (bw_fetcher uses the native exe).
+httpx[http2]>=0.27
+requests>=2.31
+# curl_cffi: TLS-fingerprint impersonator — the true peer to BW_Fetcher.
+curl_cffi>=0.7

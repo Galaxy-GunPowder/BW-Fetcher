@@ -1,0 +1,30 @@
+{
+  "description": "HTML pages used for TLS/HTTP client benchmarks. Add or remove URLs as needed.",
+  "urls": [
+    {
+      "name": "example.com",
+      "url": "https://example.com",
+      "min_bytes": 100
+    },
+    {
+      "name": "httpbin-html",
+      "url": "https://httpbin.org/html",
+      "min_bytes": 100
+    },
+    {
+      "name": "wikipedia-en",
+      "url": "https://en.wikipedia.org/wiki/Main_Page",
+      "min_bytes": 1000
+    },
+    {
+      "name": "python-org",
+      "url": "https://www.python.org/",
+      "min_bytes": 1000
+    },
+    {
+      "name": "mozilla-org",
+      "url": "https://www.mozilla.org/en-US/",
+      "min_bytes": 1000
+    }
+  ]
+}

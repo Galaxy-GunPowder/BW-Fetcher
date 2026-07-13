@@ -1,0 +1,174 @@
+# Build everything for a release and publish it, on a version tag.
+#
+# GitHub Actions only — GitLab uses .gitlab/ci/bw-fetcher-py-release.yml
+# (different job names: bw-fetcher-cpp-linux, bw-fetcher-py-pypi-publish, …).
+#
+# Trigger:  git tag v0.2.0 && git push origin v0.2.0
+#
+# Produces, for both Linux and Windows:
+#   * a download-&-run archive  (scripts/package_release.py)  -> GitHub Release
+#   * a pip wheel (binary bundled)                            -> GitHub Release + PyPI
+#
+# So end users get BOTH no-build paths:
+#   - non-Python: grab the .zip / .tar.gz from the Release, unpack, run it.
+#   - Python:     pip install bw-fetcher-py  (pip picks the right platform wheel).
+#
+# One secret is required for the PyPI upload: PYPI_API_TOKEN
+#   (repo Settings > Secrets and variables > Actions). Create the token at
+#   https://pypi.org/manage/account/token/ -- scope it to `bw-fetcher-py` after the
+#   first upload. Without it, the build + GitHub Release still succeed; only the
+#   PyPI step fails.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}   # lets you run a dry build from the Actions tab
+
+permissions:
+  contents: write          # needed to create the GitHub Release
+
+jobs:
+  # Linux — job name: build-linux (GitLab: bw-fetcher-cpp-linux + bw-fetcher-py-wheel-linux)
+  build-linux:
+    runs-on: ubuntu-latest
+    container: quay.io/pypa/manylinux_2_28_x86_64
+    env:
+      PY: /opt/python/cp311-cp311/bin/python
+      BORINGSSL_ROOT: /tmp/boringssl
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          dnf install -y epel-release || true
+          dnf install -y golang ninja-build libnghttp2-devel brotli-devel zlib-devel pkgconf-pkg-config git
+          "$PY" -m pip install --upgrade pip build auditwheel cmake
+
+      - name: Build BoringSSL (static)
+        run: |
+          git clone --depth 1 https://boringssl.googlesource.com/boringssl "$BORINGSSL_ROOT"
+          cmake -S "$BORINGSSL_ROOT" -B "$BORINGSSL_ROOT/build" -GNinja -DCMAKE_BUILD_TYPE=Release
+          ninja -C "$BORINGSSL_ROOT/build" crypto ssl
+
+      - name: Build BW_Fetcher
+        run: |
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DBORINGSSL_ROOT="$BORINGSSL_ROOT"
+          ninja -C build BW_Fetcher
+
+      - name: Build wheel (auditwheel-repaired)
+        run: |
+          (cd python && "$PY" scripts/stage_binaries.py --build-dir ../build)
+          "$PY" -m build --wheel --outdir dist_raw python
+          auditwheel repair dist_raw/*.whl -w dist
+
+      - name: Build download-&-run tarball
+        run: |
+          "$PY" scripts/package_release.py --build-dir build --outdir release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            dist/*.whl
+            release/*.tar.gz
+
+  # ---------------------------------------------------------------------------
+  # Windows: replicates the local dev setup (Ninja + MSVC, BoringSSL built with
+  # the VS generator so its libs land in build/Release/ where CMakeLists.txt
+  # expects them; nghttp2/brotli/zlib come from vcpkg).
+  #
+  # NOTE: the BoringSSL build is the step most likely to need a first-run tweak
+  # (BoringSSL's build occasionally changes its target/lib layout). If this job
+  # is red on the first tag, you can always build the Windows artifacts locally
+  # (see python/RELEASING.md) and attach them to the Release by hand.
+  # ---------------------------------------------------------------------------
+  build-windows:
+    runs-on: windows-latest
+    env:
+      BORINGSSL_ROOT: ${{ github.workspace }}\boringssl
+      VCPKG_ROOT: C:\vcpkg
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install vcpkg dependencies (nghttp2, brotli, zlib)
+        run: vcpkg install nghttp2:x64-windows brotli:x64-windows zlib:x64-windows
+
+      - name: Build BoringSSL (MSVC, Release)
+        run: |
+          git clone --depth 1 https://boringssl.googlesource.com/boringssl "$env:BORINGSSL_ROOT"
+          cmake -S "$env:BORINGSSL_ROOT" -B "$env:BORINGSSL_ROOT\build" -G "Visual Studio 17 2022" -A x64
+          cmake --build "$env:BORINGSSL_ROOT\build" --config Release --target crypto ssl
+
+      - name: Build BW_Fetcher
+        run: |
+          cmake -S . -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
+            -DBORINGSSL_ROOT="$env:BORINGSSL_ROOT" `
+            -DNGHTTP2_ROOT="$env:VCPKG_ROOT\installed\x64-windows"
+          cmake --build build-win --target BW_Fetcher
+
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python python\scripts\stage_binaries.py --build-dir build-win
+          python -m build --wheel --outdir dist python
+
+      - name: Build download-&-run zip
+        run: python scripts\package_release.py --build-dir build-win --outdir release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/*.whl
+            release/*.zip
+
+  # ---------------------------------------------------------------------------
+  # Release: collect every platform's artifacts, attach them to a GitHub Release
+  # for the tag, and push the wheels to PyPI.
+  # ---------------------------------------------------------------------------
+  release:
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect wheels and archives
+        run: |
+          mkdir -p dist release
+          find artifacts -name '*.whl'    -exec cp {} dist/ \;
+          find artifacts -name '*.tar.gz' -exec cp {} release/ \;
+          find artifacts -name '*.zip'    -exec cp {} release/ \;
+          echo "== wheels ==";   ls -l dist
+          echo "== archives =="; ls -l release
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          # Attach both the download-&-run archives and the wheels.
+          files: |
+            release/*
+            dist/*.whl
+          generate_release_notes: true
+
+      - name: Publish wheels to PyPI
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          python -m pip install --upgrade twine
+          twine check dist/*.whl
+          twine upload --non-interactive dist/*.whl

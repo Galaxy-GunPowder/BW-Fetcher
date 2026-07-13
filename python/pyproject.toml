@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=77.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bw-fetcher-py"
+version = "0.2.0"
+description = "Python wrapper + bot-detection for BW-Fetcher (C++ TLS-fingerprint fetcher)"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "李" }]
+keywords = ["tls", "fingerprint", "http2", "fetch", "boringssl", "anti-bot", "scraping", "bot-detection"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: C++",
+    "Topic :: Internet :: WWW/HTTP",
+]
+
+[project.urls]
+Homepage = "https://github.com/Galaxy-GunPowder/BW-TCP-Client"
+Repository = "https://github.com/Galaxy-GunPowder/BW-TCP-Client"
+
+[project.scripts]
+bw-fetcher-py = "bw_fetcher_py.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["bw_fetcher_py*"]
+
+[tool.setuptools.package-data]
+bw_fetcher_py = ["_bin/*", "py.typed"]

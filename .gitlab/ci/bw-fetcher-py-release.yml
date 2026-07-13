@@ -1,0 +1,186 @@
+# GitLab release pipeline for bw-fetcher-py (PyPI: pip install bw-fetcher-py)
+#
+# Job names are GitLab-specific (not the same as GitHub Actions).
+#
+# | GitLab job                  | GitHub Actions equivalent |
+# |-----------------------------|---------------------------|
+# | bw-fetcher-cpp-linux        | build-linux               |
+# | bw-fetcher-py-wheel-linux   | (part of build-linux)     |
+# | bw-fetcher-cpp-windows      | build-windows             |
+# | bw-fetcher-py-wheel-windows | (part of build-windows)   |
+# | bw-fetcher-py-pypi-publish  | release (PyPI step)       |
+#
+# Optional GitLab Release assets job: bw-fetcher-gitlab-release
+
+stages:
+  - cpp_build
+  - python_wheel
+  - pypi_publish
+  - gitlab_release
+
+variables:
+  PYPI_PACKAGE: bw-fetcher-py
+  PYTHON_DIR: python
+  CPP_BUILD_LINUX: build-linux
+  CPP_BUILD_WINDOWS: build-windows
+
+# ---------------------------------------------------------------------------
+# Linux C++ → BW-Fetcher-linux64 (manylinux container)
+# ---------------------------------------------------------------------------
+bw-fetcher-cpp-linux:
+  stage: cpp_build
+  image: quay.io/pypa/manylinux_2_28_x86_64
+  variables:
+    PY: /opt/python/cp311-cp311/bin/python
+    BORINGSSL_ROOT: /tmp/boringssl
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
+    - if: $CI_PIPELINE_SOURCE == "web"
+  script:
+    - $PY -m pip install --upgrade pip cmake
+    - dnf install -y epel-release || true
+    - dnf install -y golang ninja-build libnghttp2-devel brotli-devel zlib-devel pkgconf-pkg-config git
+    - git clone --depth 1 https://boringssl.googlesource.com/boringssl "$BORINGSSL_ROOT"
+    - cmake -S "$BORINGSSL_ROOT" -B "$BORINGSSL_ROOT/build" -GNinja -DCMAKE_BUILD_TYPE=Release
+    - ninja -C "$BORINGSSL_ROOT/build" crypto ssl
+    - cmake -S . -B "$CPP_BUILD_LINUX" -GNinja -DCMAKE_BUILD_TYPE=Release -DBORINGSSL_ROOT="$BORINGSSL_ROOT"
+    - ninja -C "$CPP_BUILD_LINUX" BW_Fetcher
+    - test -f "$CPP_BUILD_LINUX/BW-Fetcher-linux64"
+    - $PY scripts/package_release.py --build-dir "$CPP_BUILD_LINUX" --outdir release-linux
+  artifacts:
+    name: bw-fetcher-cpp-linux-$CI_COMMIT_SHORT_SHA
+    paths:
+      - $CPP_BUILD_LINUX/BW-Fetcher-linux64
+      - release-linux/*.tar.gz
+    expire_in: 2 weeks
+
+# ---------------------------------------------------------------------------
+# Linux Python wheel (manylinux, auditwheel)
+# ---------------------------------------------------------------------------
+bw-fetcher-py-wheel-linux:
+  stage: python_wheel
+  image: quay.io/pypa/manylinux_2_28_x86_64
+  needs:
+    - job: bw-fetcher-cpp-linux
+      artifacts: true
+  variables:
+    PY: /opt/python/cp311-cp311/bin/python
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
+    - if: $CI_PIPELINE_SOURCE == "web"
+  script:
+    - $PY -m pip install --upgrade pip build auditwheel
+    - (cd "$PYTHON_DIR" && $PY scripts/stage_binaries.py --build-dir "../$CPP_BUILD_LINUX")
+    - $PY -m build --wheel --outdir dist_raw "$PYTHON_DIR"
+    - auditwheel repair dist_raw/*.whl -w dist
+    - ls -la dist/
+  artifacts:
+    name: bw-fetcher-py-wheel-linux-$CI_COMMIT_SHORT_SHA
+    paths:
+      - dist/*.whl
+    expire_in: 2 weeks
+
+# ---------------------------------------------------------------------------
+# Windows C++ — requires a runner tagged `windows` (manual on tag)
+# ---------------------------------------------------------------------------
+bw-fetcher-cpp-windows:
+  stage: cpp_build
+  tags: [windows]
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
+      when: manual
+      allow_failure: true
+  variables:
+    BORINGSSL_ROOT: "C:/deps/boringssl"
+    NGHTTP2_ROOT: "C:/deps/nghttp2_x64-windows"
+    VCPKG_TOOLCHAIN: "C:/vcpkg/scripts/buildsystems/vcpkg.cmake"
+  script:
+    - cmake -S . -B $CPP_BUILD_WINDOWS -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_TOOLCHAIN -DBORINGSSL_ROOT=$env:BORINGSSL_ROOT -DNGHTTP2_ROOT=$env:NGHTTP2_ROOT
+    - cmake --build $CPP_BUILD_WINDOWS --target BW_Fetcher
+    - if (-not (Test-Path "$CPP_BUILD_WINDOWS/BW-Fetcher-win64.exe")) { exit 1 }
+    - python scripts/package_release.py --build-dir $CPP_BUILD_WINDOWS --outdir release-windows
+  artifacts:
+    name: bw-fetcher-cpp-windows-$CI_COMMIT_SHORT_SHA
+    paths:
+      - $CPP_BUILD_WINDOWS/BW-Fetcher-win64.exe
+      - release-windows/*.zip
+    expire_in: 2 weeks
+
+# ---------------------------------------------------------------------------
+# Windows Python wheel
+# ---------------------------------------------------------------------------
+bw-fetcher-py-wheel-windows:
+  stage: python_wheel
+  tags: [windows]
+  needs: [bw-fetcher-cpp-windows]
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
+      when: manual
+      allow_failure: true
+  script:
+    - python -m pip install --upgrade pip build
+    - python python/scripts/stage_binaries.py --build-dir $CPP_BUILD_WINDOWS
+    - python -m build --wheel --outdir dist python
+    - dir dist
+  artifacts:
+    name: bw-fetcher-py-wheel-windows-$CI_COMMIT_SHORT_SHA
+    paths:
+      - dist/*.whl
+    expire_in: 2 weeks
+
+# ---------------------------------------------------------------------------
+# PyPI — upload all wheels from linux (+ windows if that job ran)
+# ---------------------------------------------------------------------------
+bw-fetcher-py-pypi-publish:
+  stage: pypi_publish
+  image: python:3.12-slim
+  needs:
+    - job: bw-fetcher-py-wheel-linux
+      artifacts: true
+    - job: bw-fetcher-py-wheel-windows
+      artifacts: true
+      optional: true
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
+  script:
+    - pip install --upgrade twine
+    - ls -la dist/
+    - twine check dist/*.whl
+    - TWINE_USERNAME=__token__ TWINE_PASSWORD="$PYPI_API_TOKEN" twine upload --non-interactive dist/*.whl
+  environment:
+    name: pypi/$PYPI_PACKAGE
+    url: https://pypi.org/project/$PYPI_PACKAGE/
+
+# ---------------------------------------------------------------------------
+# Optional: attach binaries to GitLab Release (not GitHub Release)
+# ---------------------------------------------------------------------------
+bw-fetcher-gitlab-release:
+  stage: gitlab_release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  needs:
+    - job: bw-fetcher-cpp-linux
+      artifacts: true
+    - job: bw-fetcher-py-wheel-linux
+      artifacts: true
+    - job: bw-fetcher-cpp-windows
+      artifacts: true
+      optional: true
+    - job: bw-fetcher-py-wheel-windows
+      artifacts: true
+      optional: true
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
+  script:
+    - echo "Creating GitLab release for $CI_COMMIT_TAG"
+  release:
+    tag_name: $CI_COMMIT_TAG
+    name: $PYPI_PACKAGE $CI_COMMIT_TAG
+    description: |
+      PyPI package **$PYPI_PACKAGE** — `pip install $PYPI_PACKAGE`
+
+      Includes Linux C++ tarball, Python wheels, and optional Windows artifacts.
+    assets:
+      links:
+        - name: PyPI
+          url: https://pypi.org/project/$PYPI_PACKAGE/
+          link_type: package
